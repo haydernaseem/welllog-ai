@@ -20,7 +20,7 @@ from sklearn.cluster import KMeans
 app = Flask(__name__)
 
 # ✅ Allow connections from Firebase Hosting + localhost + any origin
-CORS(app, resources={r"/*": {"origins": ["https://petroai-iq.web.app", "http://localhost:5500", "*"]}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": ["https://petroai-iq.web.app", "https://petroai-iq.web.app/well-log.html" ,"http://localhost:5500", "*"]}}, supports_credentials=True)
 
 ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'las'}
 
