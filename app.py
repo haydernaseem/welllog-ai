@@ -2,7 +2,6 @@ import io
 import base64
 import pandas as pd
 import numpy as np
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import plotly.graph_objects as go
@@ -13,28 +12,21 @@ from reportlab.pdfgen import canvas
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.cluster import KMeans
 
-# ======================================================
-# 🔹 إعداد Flask + CORS (متوافق مع Firebase و Render)
-# ======================================================
 app = Flask(__name__)
-CORS(app, origins=[
-    "https://petroai-web.web.app",
-    "https://petroai-web.firebaseapp.com",
-    "http://localhost:5000",
-    "http://127.0.0.1:5000",
-    "https://petroai-iq.web.app",
-    "https://petroai-iq.web.app/well-log.html"
-])
+CORS(app)  # نفعّل CORS افتراضياً
+
+# ✅ إضافة ترويسات CORS يدوياً بعد كل رد (تعمل دائماً حتى على Render)
+@app.after_request
+def apply_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
 
 ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'las'}
 
-
-# ======================================================
-# 🧩 دوال مساعدة
-# ======================================================
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 
 def detect_column(df, keywords):
     for key in keywords:
@@ -42,7 +34,6 @@ def detect_column(df, keywords):
             if key.lower() in str(col).lower():
                 return col
     return None
-
 
 def build_lithology_model(df, feature_cols, lith_col):
     df_lith = df.dropna(subset=feature_cols + [lith_col])
@@ -53,7 +44,6 @@ def build_lithology_model(df, feature_cols, lith_col):
     model = RandomForestClassifier(n_estimators=120, random_state=42)
     model.fit(X, y)
     return model, list(model.classes_)
-
 
 def apply_lithology_model(df, feature_cols, model):
     if model is None:
@@ -70,7 +60,6 @@ def apply_lithology_model(df, feature_cols, model):
     preds[mask.values] = pred_labels
     conf[mask.values] = proba.max(axis=1)
     return preds.tolist(), conf.tolist()
-
 
 def fill_missing_logs(df, log_cols):
     info = {}
@@ -93,7 +82,6 @@ def fill_missing_logs(df, log_cols):
         info[col] = int(mask_pred.sum())
     return df, info
 
-
 def classify_pay_zone(df, lith_pred, lith_conf, res_col):
     pay_flag = np.array([False] * len(df))
     pay_col = detect_column(df, ['PAY', 'PAY_FLAG', 'NETPAY', 'PAYZONE'])
@@ -113,7 +101,6 @@ def classify_pay_zone(df, lith_pred, lith_conf, res_col):
             pass
     return pay_flag, 'rule_based'
 
-
 def compute_net_pay(df, depth_col, pay_flag):
     try:
         depth = pd.to_numeric(df[depth_col], errors='coerce')
@@ -127,17 +114,12 @@ def compute_net_pay(df, depth_col, pay_flag):
     except Exception:
         return 0.0
 
-
 def estimate_porosity(rhob_series):
     rho_ma, rho_f = 2.65, 1.0
     rhob = pd.to_numeric(rhob_series, errors='coerce')
     phi = (rho_ma - rhob) / (rho_ma - rho_f)
     return phi.clip(0, 0.35)
 
-
-# ======================================================
-# 📊 الرسومات
-# ======================================================
 def make_log_plot(df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred):
     fig = make_subplots(rows=1, cols=4, shared_yaxes=True, horizontal_spacing=0.05,
                         subplot_titles=("Gamma Ray", "Density & NPHI", "Resistivity", "Lithology"))
@@ -158,55 +140,6 @@ def make_log_plot(df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred)
                       title="OILNOVA Well Log AI – Tracks View")
     return fig
 
-
-def make_crossplots(df, gr_col, res_col, rhob_col, nphi_col, lith_pred):
-    figs = []
-    if gr_col and res_col and gr_col in df.columns and res_col in df.columns:
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=df[gr_col], y=df[res_col], mode='markers',
-                                  marker=dict(color=df[gr_col], colorscale='Viridis', size=5)))
-        fig1.update_xaxes(title_text="GR")
-        fig1.update_yaxes(title_text="RES", type='log')
-        fig1.update_layout(template="plotly_dark", title="GR vs Resistivity")
-        figs.append(fig1)
-    if rhob_col and nphi_col and rhob_col in df.columns and nphi_col in df.columns:
-        color_map = {'sandstone': '#facc15', 'shale': '#6b7280', 'limestone': '#93c5fd',
-                     'dolomite': '#fdba74', 'tight': '#92400e', 'unknown': '#ffffff'}
-        color_list = [color_map.get(str(l).lower(), '#ffffff') for l in lith_pred]
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=df[rhob_col], y=df[nphi_col], mode='markers',
-                                  marker=dict(size=6, color=color_list), text=lith_pred))
-        fig2.update_xaxes(title_text="RHOB")
-        fig2.update_yaxes(title_text="NPHI")
-        fig2.update_layout(template="plotly_dark",
-                           title="RHOB vs NPHI (AI Lithology Coloring)")
-        figs.append(fig2)
-    return figs
-
-
-def make_3d_cluster(df, gr_col, rhob_col, nphi_col):
-    try:
-        cols = [c for c in [gr_col, rhob_col, nphi_col] if c and c in df.columns]
-        if len(cols) < 3:
-            return None
-        sub = df[cols].dropna()
-        if len(sub) < 50:
-            return None
-        kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(sub.values)
-        fig = go.Figure(data=[go.Scatter3d(x=sub[cols[0]], y=sub[cols[1]], z=sub[cols[2]],
-                                           mode='markers',
-                                           marker=dict(size=4, color=labels, colorscale='Viridis', opacity=0.8))])
-        fig.update_layout(template="plotly_dark",
-                          title="3D AI Clusters (GR–RHOB–NPHI)")
-        return fig
-    except Exception:
-        return None
-
-
-# ======================================================
-# 🧾 توليد التقرير PDF
-# ======================================================
 def generate_pdf_report(summary_text):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -225,10 +158,6 @@ def generate_pdf_report(summary_text):
     buffer.seek(0)
     return base64.b64encode(buffer.read()).decode('utf-8')
 
-
-# ======================================================
-# 🚀 المسار الرئيسي
-# ======================================================
 @app.route('/analyze_welllog', methods=['POST'])
 def analyze_welllog():
     try:
@@ -299,41 +228,20 @@ def analyze_welllog():
                   f"Missing logs: {fill_info}\nAvg porosity in pay: {avg_phi_pay:.3f}"
         pdf_b64 = generate_pdf_report(summary)
 
-        main_fig = make_log_plot(df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred)
-        cross_figs = make_crossplots(df, gr_col, res_col, rhob_col, nphi_col, lith_pred)
-        cluster_fig = make_3d_cluster(df, gr_col, rhob_col, nphi_col)
-
-        def fig_to_b64(fig):
-            img = fig.to_image(format="png", width=900, height=600, scale=2)
-            return "data:image/png;base64," + base64.b64encode(img).decode()
-
-        images = {"main_logs": fig_to_b64(main_fig)}
-        for i, f in enumerate(cross_figs, 1):
-            images[f"crossplot{i}"] = fig_to_b64(f)
-        if cluster_fig:
-            images["cluster3d"] = fig_to_b64(cluster_fig)
-
-        # ✅ إضافة CORS Headers يدوياً
-        response = jsonify({
+        return jsonify({
             "lithology_counts": lith_counts,
             "net_pay": net_pay,
             "pay_source": pay_source,
             "fill_info": fill_info,
             "avg_phi_pay": avg_phi_pay,
-            "images": images,
             "pdf_report": {
                 "filename": "OILNOVA_WellLog_Report.pdf",
                 "data": "data:application/pdf;base64," + pdf_b64
             }
         })
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-        return response
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=False)
