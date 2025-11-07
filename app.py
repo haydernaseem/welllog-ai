@@ -5,19 +5,22 @@ import numpy as np
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import lasio
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.cluster import KMeans
 
+# ============================================
+# Flask App + CORS Configuration
+# ============================================
 app = Flask(__name__)
-CORS(app)
+
+# ✅ Allow connections from Firebase Hosting + localhost + any origin
+CORS(app, resources={r"/*": {"origins": ["https://petroai-iq.web.app", "http://localhost:5500", "*"]}}, supports_credentials=True)
 
 ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'las'}
 
@@ -27,7 +30,7 @@ def allowed_file(filename):
 
 
 def detect_column(df, keywords):
-    """البحث عن عمود يحتوي على أي من الكلمات المفتاحية."""
+    """Find column matching keywords."""
     for key in keywords:
         for col in df.columns:
             if key.lower() in str(col).lower():
@@ -36,19 +39,16 @@ def detect_column(df, keywords):
 
 
 def build_lithology_model(df, feature_cols, lith_col):
-    """بناء نموذج RandomForest للـ Lithology إذا توفرت Labels حقيقية."""
     df_lith = df.dropna(subset=feature_cols + [lith_col])
     if df_lith[lith_col].nunique() < 2 or len(df_lith) < 50:
-        return None, None
-    X = df_lith[feature_cols].values
-    y = df_lith[lith_col].astype(str).values
+        return None
+    X, y = df_lith[feature_cols].values, df_lith[lith_col].astype(str).values
     model = RandomForestClassifier(n_estimators=120, random_state=42)
     model.fit(X, y)
-    return model, list(model.classes_)
+    return model
 
 
 def apply_lithology_model(df, feature_cols, model):
-    """تطبيق النموذج المدرب لتصنيف lithology."""
     if model is None:
         return ['Unknown'] * len(df), [0.0] * len(df)
     df_feat = df[feature_cols]
@@ -66,7 +66,6 @@ def apply_lithology_model(df, feature_cols, model):
 
 
 def fill_missing_logs(df, log_cols):
-    """تنبؤ القيم المفقودة باستخدام RandomForestRegressor."""
     info = {}
     for col in log_cols:
         if col not in df.columns or df[col].isna().sum() == 0:
@@ -83,14 +82,12 @@ def fill_missing_logs(df, log_cols):
         mask_pred = df[col].isna() & df[other_cols].notna().all(axis=1)
         if mask_pred.sum() == 0:
             continue
-        df.loc[mask_pred, col] = model.predict(
-            df.loc[mask_pred, other_cols].values)
+        df.loc[mask_pred, col] = model.predict(df.loc[mask_pred, other_cols].values)
         info[col] = int(mask_pred.sum())
     return df, info
 
 
 def classify_pay_zone(df, lith_pred, lith_conf, res_col):
-    """كشف Pay Zone عبر lithology + resistivity + الثقة."""
     pay_flag = np.array([False] * len(df))
     pay_col = detect_column(df, ['PAY', 'PAY_FLAG', 'NETPAY', 'PAYZONE'])
     if pay_col and df[pay_col].dropna().nunique() >= 2:
@@ -99,8 +96,7 @@ def classify_pay_zone(df, lith_pred, lith_conf, res_col):
         return pay_flag, 'from_label'
     high_conf = np.array(lith_conf) >= 0.6
     lith_array = np.char.lower(np.array(lith_pred, dtype=str))
-    oil_like = np.isin(
-        lith_array, ['sandstone', 'sand', 'dolomite', 'limestone'])
+    oil_like = np.isin(lith_array, ['sandstone', 'sand', 'dolomite', 'limestone'])
     pay_flag = oil_like & high_conf
     if res_col and res_col in df.columns:
         try:
@@ -112,7 +108,6 @@ def classify_pay_zone(df, lith_pred, lith_conf, res_col):
 
 
 def compute_net_pay(df, depth_col, pay_flag):
-    """حساب net pay."""
     try:
         depth = pd.to_numeric(df[depth_col], errors='coerce')
         mask = (~depth.isna()) & pay_flag
@@ -127,7 +122,6 @@ def compute_net_pay(df, depth_col, pay_flag):
 
 
 def estimate_porosity(rhob_series):
-    """تقدير porosity من RHOB."""
     rho_ma, rho_f = 2.65, 1.0
     rhob = pd.to_numeric(rhob_series, errors='coerce')
     phi = (rho_ma - rhob) / (rho_ma - rho_f)
@@ -135,19 +129,14 @@ def estimate_porosity(rhob_series):
 
 
 def make_log_plot(df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred):
-    """رسم Tracks للـLogs."""
     fig = make_subplots(rows=1, cols=4, shared_yaxes=True, horizontal_spacing=0.05,
                         subplot_titles=("Gamma Ray", "Density & NPHI", "Resistivity", "Lithology"))
     depth = df[depth_col]
-    fig.add_trace(go.Scatter(
-        x=df[gr_col], y=depth, mode='lines', line=dict(color='lime', width=2)), 1, 1)
-    fig.add_trace(go.Scatter(x=df[rhob_col], y=depth,
-                  mode='lines', line=dict(color='orange')), 1, 2)
-    fig.add_trace(go.Scatter(x=df[nphi_col], y=depth,
-                  mode='lines', line=dict(color='cyan')), 1, 2)
+    fig.add_trace(go.Scatter(x=df[gr_col], y=depth, mode='lines', line=dict(color='lime', width=2)), 1, 1)
+    fig.add_trace(go.Scatter(x=df[rhob_col], y=depth, mode='lines', line=dict(color='orange')), 1, 2)
+    fig.add_trace(go.Scatter(x=df[nphi_col], y=depth, mode='lines', line=dict(color='cyan')), 1, 2)
     if res_col and res_col in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df[res_col], y=depth, mode='lines', line=dict(color='red')), 1, 3)
+        fig.add_trace(go.Scatter(x=df[res_col], y=depth, mode='lines', line=dict(color='red')), 1, 3)
         fig.update_xaxes(title_text="Res", type='log', row=1, col=3)
     color_map = {'sandstone': '#facc15', 'shale': '#6b7280', 'limestone': '#93c5fd',
                  'dolomite': '#fdba74', 'tight': '#92400e', 'unknown': '#ffffff'}
@@ -161,7 +150,6 @@ def make_log_plot(df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred)
 
 
 def make_crossplots(df, gr_col, res_col, rhob_col, nphi_col, lith_pred):
-    """Crossplots GR-RES و RHOB-NPHI."""
     figs = []
     if gr_col and res_col and gr_col in df.columns and res_col in df.columns:
         fig1 = go.Figure()
@@ -174,8 +162,7 @@ def make_crossplots(df, gr_col, res_col, rhob_col, nphi_col, lith_pred):
     if rhob_col and nphi_col and rhob_col in df.columns and nphi_col in df.columns:
         color_map = {'sandstone': '#facc15', 'shale': '#6b7280', 'limestone': '#93c5fd',
                      'dolomite': '#fdba74', 'tight': '#92400e', 'unknown': '#ffffff'}
-        color_list = [color_map.get(str(l).lower(), '#ffffff')
-                      for l in lith_pred]
+        color_list = [color_map.get(str(l).lower(), '#ffffff') for l in lith_pred]
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(x=df[rhob_col], y=df[nphi_col], mode='markers',
                                   marker=dict(size=6, color=color_list), text=lith_pred))
@@ -188,10 +175,8 @@ def make_crossplots(df, gr_col, res_col, rhob_col, nphi_col, lith_pred):
 
 
 def make_3d_cluster(df, gr_col, rhob_col, nphi_col):
-    """رسم 3D clustering."""
     try:
-        cols = [c for c in [gr_col, rhob_col, nphi_col]
-                if c and c in df.columns]
+        cols = [c for c in [gr_col, rhob_col, nphi_col] if c and c in df.columns]
         if len(cols) < 3:
             return None
         sub = df[cols].dropna()
@@ -202,15 +187,13 @@ def make_3d_cluster(df, gr_col, rhob_col, nphi_col):
         fig = go.Figure(data=[go.Scatter3d(x=sub[cols[0]], y=sub[cols[1]], z=sub[cols[2]],
                                            mode='markers',
                                            marker=dict(size=4, color=labels, colorscale='Viridis', opacity=0.8))])
-        fig.update_layout(template="plotly_dark",
-                          title="3D AI Clusters (GR–RHOB–NPHI)")
+        fig.update_layout(template="plotly_dark", title="3D AI Clusters (GR–RHOB–NPHI)")
         return fig
     except Exception:
         return None
 
 
 def generate_pdf_report(summary_text):
-    """إنشاء تقرير PDF مختصر."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
@@ -237,6 +220,7 @@ def analyze_welllog():
         file = request.files['file']
         if not allowed_file(file.filename):
             return jsonify({'error': 'Invalid file type'}), 400
+
         ext = file.filename.split('.')[-1].lower()
         if ext == 'csv':
             df = pd.read_csv(file)
@@ -260,20 +244,12 @@ def analyze_welllog():
         if not all([depth_col, gr_col, rhob_col, nphi_col]):
             return jsonify({'error': 'Missing essential logs'}), 400
 
-        df, fill_info = fill_missing_logs(
-            df, [gr_col, rhob_col, nphi_col, res_col])
+        df, fill_info = fill_missing_logs(df, [gr_col, rhob_col, nphi_col, res_col])
         df['PHI_AI'] = estimate_porosity(df[rhob_col])
 
-        feature_cols = [c for c in [gr_col, rhob_col,
-                                    nphi_col, res_col, 'PHI_AI'] if c]
-        lith_model = None
-        lith_pred, lith_conf = ['Unknown'] * len(df), [0.0] * len(df)
-
-        if lith_col:
-            lith_model, _ = build_lithology_model(df, feature_cols, lith_col)
-            if lith_model:
-                lith_pred, lith_conf = apply_lithology_model(
-                    df, feature_cols, lith_model)
+        feature_cols = [c for c in [gr_col, rhob_col, nphi_col, res_col, 'PHI_AI'] if c]
+        lith_model = build_lithology_model(df, feature_cols, lith_col) if lith_col else None
+        lith_pred, lith_conf = apply_lithology_model(df, feature_cols, lith_model)
 
         if lith_model is None:
             for i, row in df.iterrows():
@@ -289,24 +265,19 @@ def analyze_welllog():
                         lith_pred[i] = 'Tight'
                     lith_conf[i] = 0.6
 
-        pay_flag, pay_source = classify_pay_zone(
-            df, lith_pred, lith_conf, res_col)
+        pay_flag, pay_source = classify_pay_zone(df, lith_pred, lith_conf, res_col)
         net_pay = compute_net_pay(df, depth_col, pay_flag)
-        avg_phi_pay = float(pd.Series(df['PHI_AI'])[
-                            pay_flag].mean()) if pay_flag.any() else 0.0
+        avg_phi_pay = float(pd.Series(df['PHI_AI'])[pay_flag].mean()) if pay_flag.any() else 0.0
         lith_counts = pd.Series(lith_pred).value_counts().to_dict()
 
         summary = f"OILNOVA Well Log AI – Summary\n\nSamples: {len(df)}\n\n" \
-                  f"Lithology distribution:\n" + \
-                  "\n".join(f"  - {k}: {v}" for k, v in lith_counts.items()) + \
+                  f"Lithology distribution:\n" + "\n".join(f"  - {k}: {v}" for k, v in lith_counts.items()) + \
                   f"\n\nNet pay: {net_pay:.2f}\nPay source: {pay_source}\n" \
                   f"Missing logs: {fill_info}\nAvg porosity in pay: {avg_phi_pay:.3f}"
         pdf_b64 = generate_pdf_report(summary)
 
-        main_fig = make_log_plot(
-            df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred)
-        cross_figs = make_crossplots(
-            df, gr_col, res_col, rhob_col, nphi_col, lith_pred)
+        main_fig = make_log_plot(df, depth_col, gr_col, rhob_col, nphi_col, res_col, lith_pred)
+        cross_figs = make_crossplots(df, gr_col, res_col, rhob_col, nphi_col, lith_pred)
         cluster_fig = make_3d_cluster(df, gr_col, rhob_col, nphi_col)
 
         def fig_to_b64(fig):
@@ -319,7 +290,7 @@ def analyze_welllog():
         if cluster_fig:
             images["cluster3d"] = fig_to_b64(cluster_fig)
 
-        return jsonify({
+        response = jsonify({
             "lithology_counts": lith_counts,
             "net_pay": net_pay,
             "pay_source": pay_source,
@@ -329,6 +300,11 @@ def analyze_welllog():
             "pdf_report": {"filename": "OILNOVA_WellLog_Report.pdf",
                            "data": "data:application/pdf;base64," + pdf_b64}
         })
+        # ✅ Add CORS headers explicitly
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        return response
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
